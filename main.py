@@ -1,107 +1,149 @@
 """
-BaseMemeCV - Base Chain Meme Edition
+BaseMemeCV - Real-time Face Expression Meme Viewer
 
-A openCV + MediaPipe program that detects facial expressions 
-and displays BASE CHAIN memes (Brett, Toshi, Degen...) in real time.
+An OpenCV + MediaPipe app that detects facial expressions from webcam input
+and displays corresponding Base meme images.
 """
+
+import os
 
 import cv2
 import mediapipe as mp
 
-# ====================== KHỞI TẠO ======================
+# Initialize MediaPipe FaceMesh
 face_mesh = mp.solutions.face_mesh.FaceMesh(
     min_detection_confidence=0.5,
     min_tracking_confidence=0.5,
-    max_num_faces=1
+    max_num_faces=1,
 )
 
-cam = cv2.VideoCapture(0)
+# Detection thresholds (kept from original baseline)
+eye_opening_threshold = 0.025
+mouth_open_threshold = 0.03
+squinting_threshold = 0.018
 
-# ====================== THRESHOLDS (có thể chỉnh) ======================
-eye_opening_threshold = 0.025   # Shock (mắt trợn to)
-mouth_open_threshold = 0.03     # Tongue (miệng thè lưỡi)
-squinting_threshold = 0.018     # Glare (mắt lườm/híp)
+# Expression -> meme image mapping
+ASSET_MAP = {
+    "shock": "assets/brett-shock.png",
+    "tongue": "assets/toshi-tongue.png",
+    "glare": "assets/brett-glare.png",
+    "fallback": "assets/larry-base.png",
+}
 
-# ====================== HÀM PHÁT HIỆN BIỂU CẢM ======================
-def meme_shock(face_landmark_points):
-    l_top = face_landmark_points.landmark[159]
-    l_bot = face_landmark_points.landmark[145]
-    r_top = face_landmark_points.landmark[386]
-    r_bot = face_landmark_points.landmark[374]
+
+def is_shock(face_landmarks):
+    """Detect 'shock' by checking if eyes are widely open."""
+    l_top = face_landmarks.landmark[159]
+    l_bot = face_landmarks.landmark[145]
+    r_top = face_landmarks.landmark[386]
+    r_bot = face_landmarks.landmark[374]
 
     eye_opening = (abs(l_top.y - l_bot.y) + abs(r_top.y - r_bot.y)) / 2.0
     return eye_opening > eye_opening_threshold
 
-def meme_tongue(face_landmark_points):
-    top_lip = face_landmark_points.landmark[13]
-    bottom_lip = face_landmark_points.landmark[14]
+
+def is_tongue(face_landmarks):
+    """Detect 'tongue' style expression by checking mouth opening."""
+    top_lip = face_landmarks.landmark[13]
+    bottom_lip = face_landmarks.landmark[14]
 
     mouth_open = abs(top_lip.y - bottom_lip.y)
     return mouth_open > mouth_open_threshold
 
-def meme_glare(face_landmark_points):
-    l_top = face_landmark_points.landmark[159]
-    l_bot = face_landmark_points.landmark[145]
-    r_top = face_landmark_points.landmark[386]
-    r_bot = face_landmark_points.landmark[374]
+
+def is_glare(face_landmarks):
+    """Detect 'glare' by checking if eyes are squinting."""
+    l_top = face_landmarks.landmark[159]
+    l_bot = face_landmarks.landmark[145]
+    r_top = face_landmarks.landmark[386]
+    r_bot = face_landmarks.landmark[374]
 
     eye_squint = (abs(l_top.y - l_bot.y) + abs(r_top.y - r_bot.y)) / 2.0
     return eye_squint < squinting_threshold
 
-# ====================== MAIN ======================
+
+def select_meme(face_landmarks):
+    """Select meme image by priority: tongue > shock > glare > fallback."""
+    if is_tongue(face_landmarks):
+        return ASSET_MAP["tongue"]
+    if is_shock(face_landmarks):
+        return ASSET_MAP["shock"]
+    if is_glare(face_landmarks):
+        return ASSET_MAP["glare"]
+    return ASSET_MAP["fallback"]
+
+
+def draw_landmarks(frame, face_landmarks):
+    """Draw face landmarks for debugging."""
+    height, width = frame.shape[:2]
+    for lm in face_landmarks.landmark:
+        x = int(lm.x * width)
+        y = int(lm.y * height)
+        cv2.circle(frame, (x, y), 1, (0, 180, 0), -1)
+
+
+def show_meme_window(base_frame, image_path):
+    """Render meme image window or show a missing-file warning."""
+    meme = cv2.imread(image_path)
+    if meme is not None:
+        meme = cv2.resize(meme, (640, 480))
+        cv2.imshow("Base Meme Image", meme)
+        return
+
+    warning = base_frame * 0
+    cv2.putText(
+        warning,
+        f"Missing file: {image_path}",
+        (20, 60),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.8,
+        (0, 0, 255),
+        2,
+    )
+    cv2.imshow("Base Meme Image", warning)
+
+
+def validate_assets():
+    """Print warnings for missing asset files before app starts."""
+    missing = [path for path in ASSET_MAP.values() if not os.path.exists(path)]
+    if missing:
+        print("[WARN] Missing asset files:")
+        for path in missing:
+            print(f"  - {path}")
+
+
 def main():
+    validate_assets()
+
+    cam = cv2.VideoCapture(0)
+    if not cam.isOpened():
+        print("[ERROR] Cannot open webcam (device 0).")
+        print("Please check camera permission or close other apps using webcam.")
+        return
+
     while True:
-        ret, image = cam.read()
+        ret, frame = cam.read()
         if not ret:
+            print("[ERROR] Failed to read frame from webcam.")
             break
 
-        image = cv2.flip(image, 1)                    # Lật ngang (mirror)
-        height, width, _ = image.shape
+        frame = cv2.flip(frame, 1)
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        processed = face_mesh.process(rgb_frame)
+        faces = processed.multi_face_landmarks
 
-        rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        processed_image = face_mesh.process(rgb_image)
-        face_landmark_points = processed_image.multi_face_landmarks
+        meme_image = ASSET_MAP["shock"]  # default
 
-        # Mặc định là meme Toshi chill
-        meme_image_path = "assets/toshi-neutral.png"
+        if faces:
+            face_landmarks = faces[0]
+            meme_image = select_meme(face_landmarks)
+            draw_landmarks(frame, face_landmarks)
 
-        if face_landmark_points:
-            face_landmark_points = face_landmark_points[0]
-
-            # Ưu tiên: Tongue > Shock > Glare
-            if meme_tongue(face_landmark_points):
-                meme_image_path = "assets/toshi-tongue.png"
-            elif meme_shock(face_landmark_points):
-                meme_image_path = "assets/brett-shock.png"
-            elif meme_glare(face_landmark_points):
-                meme_image_path = "assets/brett-glare.png"
-            else:
-                meme_image_path = "assets/toshi-neutral.png"
-
-            # Vẽ landmarks lên mặt (xanh lá nhỏ)
-            for lm in face_landmark_points.landmark:
-                x = int(lm.x * width)
-                y = int(lm.y * height)
-                cv2.circle(image, (x, y), 1, (0, 100, 0), -1)
-
-        cv2.imshow('BaseMemeCV - Webcam', image)
-
-        # ==================== HIỂN THỊ MEME ====================
-        meme = cv2.imread(meme_image_path, cv2.IMREAD_UNCHANGED)  # Hỗ trợ PNG transparent
-
-        if meme is not None:
-            # Resize về kích thước đẹp (có thể chỉnh)
-            meme = cv2.resize(meme, (640, 480))
-            cv2.imshow("Base Meme Reaction", meme)
-        else:
-            # Nếu thiếu file ảnh
-            blank = image * 0
-            cv2.putText(blank, f"Missing: {meme_image_path}", (30, 60),
-                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-            cv2.imshow("Base Meme Reaction", blank)
+        cv2.imshow("Face Detection", frame)
+        show_meme_window(frame, meme_image)
 
         key = cv2.waitKey(1)
-        if key == 27:   # ESC để thoát
+        if key == 27:  # ESC to quit
             break
 
     cam.release()
@@ -109,5 +151,4 @@ def main():
 
 
 if __name__ == "__main__":
-    print("🚀 BaseMemeCV đang chạy... Nhấn ESC để thoát!")
     main()
